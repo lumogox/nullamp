@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nullamp-core",
+    "crates/nullamp-audio",
+    "crates/nullamp-app",
+]
