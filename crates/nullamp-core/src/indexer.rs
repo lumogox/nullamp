@@ -27,11 +27,18 @@ const EXCLUDED_DIRS: &[&str] = &[
     ".pnpm-store",
     ".yarn",
     "node_modules",
+    // Python virtual environments (scipy, librosa test data, etc.)
+    ".venv",
+    "venv",
+    ".tox",
+    ".conda",
+    "site-packages",
     // VCS
     ".git",
     // macOS system directories
     "Caches",
     "Application Support",
+    "Containers",       // sandboxed app data (Siri, QuickLook, etc.)
     "Group Containers", // WhatsApp, iMessage, etc.
     "Mail",
     "Messages",
@@ -40,6 +47,9 @@ const EXCLUDED_DIRS: &[&str] = &[
     "target", // Rust build output
     ".gradle",
     ".idea",
+    ".vscode",
+    // Other common non-music directories
+    ".Trash",
 ];
 
 const BATCH_SIZE: usize = 100;

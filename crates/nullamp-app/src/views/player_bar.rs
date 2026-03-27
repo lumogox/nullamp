@@ -26,18 +26,19 @@ pub fn player_bar(app: &Nullamp) -> Element<'_, Message> {
     // Current track info
     let has_track = app.current_index.is_some();
     let no_track = app.t("no_track_loaded");
-    let (track_title, _track_artist, duration) = if let Some(idx) = app.current_index {
+    let (track_title, track_artist, track_album, duration) = if let Some(idx) = app.current_index {
         if let Some(track) = app.playlist.get(idx) {
             (
                 track.title.as_deref().unwrap_or("Unknown"),
                 track.artist.as_deref().unwrap_or("Unknown"),
+                track.album.as_deref().unwrap_or(""),
                 track.duration_secs.unwrap_or(0.0),
             )
         } else {
-            (no_track, "", 0.0)
+            (no_track, "", "", 0.0)
         }
     } else {
-        (no_track, "", 0.0)
+        (no_track, "", "", 0.0)
     };
 
     let position = app.player.position().as_secs_f64();
@@ -53,6 +54,21 @@ pub fn player_bar(app: &Nullamp) -> Element<'_, Message> {
         .size(12)
         .font(crate::FONT_LED)
         .color(theme::TEXT_PRIMARY);
+    // Artist — Album line (amber artist, muted album)
+    let display_info: Element<'_, Message> = if !track_artist.is_empty() {
+        let info = if track_album.is_empty() {
+            track_artist.to_string()
+        } else {
+            format!("{track_artist}  —  {track_album}")
+        };
+        text(info)
+            .size(10)
+            .font(crate::FONT_LED)
+            .color(theme::ACCENT_AMBER)
+            .into()
+    } else {
+        Space::with_height(0).into()
+    };
     let display_time = text(format!(
         "{} / {}",
         fmt_time(position, has_track),
@@ -63,7 +79,7 @@ pub fn player_bar(app: &Nullamp) -> Element<'_, Message> {
     .color(theme::TEXT_PRIMARY);
 
     let display = container(
-        column![display_title, display_time]
+        column![display_title, display_info, display_time]
             .spacing(2)
             .padding([8, 10]),
     )
