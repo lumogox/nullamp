@@ -1,5 +1,5 @@
 use iced::Point;
-use nullamp_core::models::{MusicIntent, SyncStatus, Track};
+use nullamp_core::models::{MusicIntent, ScanProgress, SyncStatus, Track};
 
 /// Metadata for a single Whisper model (one of 4 supported sizes).
 #[derive(Debug, Clone)]
@@ -139,7 +139,10 @@ pub enum Message {
     // ── Scan ──
     ScanStart,
     ScanComplete(SyncStatus),
+    ScanProgressUpdate(ScanProgress),
     ScanCancel,
+    OpenScanModal,
+    CloseScanModal,
 
     // ── Settings ──
     OpenSettings,

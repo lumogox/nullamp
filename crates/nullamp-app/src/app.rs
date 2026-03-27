@@ -99,6 +99,8 @@ pub struct Nullamp {
     pub scan_cancel: ScanCancellation,
     pub scan_progress: Option<nullamp_core::models::ScanProgress>,
     pub is_scanning: bool,
+    pub scan_modal_open: bool,
+    pub scan_recent_files: std::collections::VecDeque<String>,
 
     // Voice
     pub mic: Option<MicCapture>,
@@ -123,6 +125,48 @@ pub struct Nullamp {
         std::collections::HashMap<&'static str, &'static str>,
     >,
 }
+
+// ── Scan streaming helpers ────────────────────────────────────────────────────
+
+/// Items flowing through the scan progress channel.
+enum ScanStreamItem {
+    Progress(nullamp_core::models::ScanProgress),
+    Done(nullamp_core::models::SyncStatus),
+}
+
+/// Unfold state machine: Boot → spawn the blocking task, Drain → read channel events.
+enum ScanUnfoldState {
+    Boot {
+        db: DbState,
+        folder: String,
+        cancel: nullamp_core::models::ScanCancellation,
+    },
+    Drain(futures::channel::mpsc::Receiver<ScanStreamItem>),
+}
+
+/// Bridges `ProgressEmitter` (called from rayon threads) into an async mpsc channel.
+/// Mutex makes it `Sync` so rayon threads can call `emit` concurrently.
+struct ChannelEmitter {
+    sender: std::sync::Mutex<futures::channel::mpsc::Sender<ScanStreamItem>>,
+}
+
+impl ChannelEmitter {
+    fn new(sender: futures::channel::mpsc::Sender<ScanStreamItem>) -> Self {
+        Self {
+            sender: std::sync::Mutex::new(sender),
+        }
+    }
+}
+
+impl nullamp_core::indexer::ProgressEmitter for ChannelEmitter {
+    fn emit(&self, progress: &nullamp_core::models::ScanProgress) {
+        if let Ok(mut tx) = self.sender.lock() {
+            let _ = tx.try_send(ScanStreamItem::Progress(progress.clone()));
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 impl Nullamp {
     pub fn new() -> (Self, Task<Message>) {
@@ -187,6 +231,8 @@ impl Nullamp {
             scan_cancel: ScanCancellation::new(),
             scan_progress: None,
             is_scanning: false,
+            scan_modal_open: false,
+            scan_recent_files: std::collections::VecDeque::new(),
             mic,
             whisper,
             voice_model_missing,
@@ -502,8 +548,12 @@ impl Nullamp {
                 self.context_menu = None;
             }
             Message::CloseSettings => {
-                self.settings_open = false;
-                let _ = self.settings.save(&self.settings_path);
+                if self.scan_modal_open {
+                    self.scan_modal_open = false;
+                } else {
+                    self.settings_open = false;
+                    let _ = self.settings.save(&self.settings_path);
+                }
             }
             Message::PickMusicFolder => {
                 return Task::perform(
@@ -547,29 +597,77 @@ impl Nullamp {
             Message::ScanStart => {
                 if let Some(ref folder) = self.settings.music_folder {
                     self.is_scanning = true;
+                    self.scan_recent_files.clear();
                     self.scan_cancel.reset();
                     let db = self.db.clone();
                     let folder = folder.clone();
                     let cancel = self.scan_cancel.clone();
-                    return Task::perform(
-                        async move {
-                            let path = std::path::Path::new(&folder);
-                            let emitter = nullamp_core::indexer::NullEmitter;
-                            nullamp_core::indexer::sync_library_parallel(
-                                &db, path, &emitter, &cancel,
-                            )
-                            .map_err(|e| e.to_string())
-                        },
-                        |result| match result {
-                            Ok(status) => Message::ScanComplete(status),
-                            Err(_) => Message::Noop,
-                        },
+
+                    return Task::run(
+                        futures::stream::unfold(
+                            ScanUnfoldState::Boot { db, folder, cancel },
+                            |state| async move {
+                                match state {
+                                    ScanUnfoldState::Boot { db, folder, cancel } => {
+                                        let (mut completion_tx, rx) =
+                                            futures::channel::mpsc::channel::<ScanStreamItem>(512);
+                                        let progress_tx = completion_tx.clone();
+
+                                        tokio::task::spawn(async move {
+                                            let result = tokio::task::spawn_blocking(move || {
+                                                let emitter = ChannelEmitter::new(progress_tx);
+                                                let path = std::path::Path::new(&folder);
+                                                nullamp_core::indexer::sync_library_parallel(
+                                                    &db, path, &emitter, &cancel,
+                                                )
+                                            })
+                                            .await;
+
+                                            let status = result
+                                                .ok()
+                                                .and_then(|r| r.ok())
+                                                .unwrap_or(nullamp_core::models::SyncStatus {
+                                                    total_tracks: 0,
+                                                    new_tracks: 0,
+                                                    removed_tracks: 0,
+                                                    scan_duration_ms: 0,
+                                                });
+                                            let _ = completion_tx
+                                                .try_send(ScanStreamItem::Done(status));
+                                        });
+
+                                        Some((None, ScanUnfoldState::Drain(rx)))
+                                    }
+                                    ScanUnfoldState::Drain(mut rx) => match rx.next().await {
+                                        Some(item) => {
+                                            Some((Some(item), ScanUnfoldState::Drain(rx)))
+                                        }
+                                        None => None,
+                                    },
+                                }
+                            },
+                        )
+                        .filter_map(|x| async move { x })
+                        .map(|item| match item {
+                            ScanStreamItem::Progress(p) => Message::ScanProgressUpdate(p),
+                            ScanStreamItem::Done(s) => Message::ScanComplete(s),
+                        }),
+                        |msg| msg,
                     );
                 }
             }
+            Message::ScanProgressUpdate(progress) => {
+                if !progress.current_file.is_empty() {
+                    if self.scan_recent_files.len() >= 50 {
+                        self.scan_recent_files.pop_front();
+                    }
+                    self.scan_recent_files
+                        .push_back(progress.current_file.clone());
+                }
+                self.scan_progress = Some(progress);
+            }
             Message::ScanComplete(status) => {
                 self.is_scanning = false;
-                self.scan_progress = None;
                 log::info!(
                     "Scan complete: {} total, {} new, {} removed",
                     status.total_tracks,
@@ -588,6 +686,12 @@ impl Nullamp {
             }
             Message::ScanCancel => {
                 self.scan_cancel.cancel();
+            }
+            Message::OpenScanModal => {
+                self.scan_modal_open = true;
+            }
+            Message::CloseScanModal => {
+                self.scan_modal_open = false;
             }
 
             // ── Whisper model management ──
@@ -958,8 +1062,10 @@ impl Nullamp {
                     }),
             )
             .on_press(Message::Noop)
+            .on_release(Message::Noop)
             .on_right_press(Message::Noop)
-            .on_middle_press(Message::Noop);
+            .on_middle_press(Message::Noop)
+            .on_move(|_| Message::Noop);
 
             // Centered settings panel (fixed width, shrink height)
             let panel = container(views::settings_view(self))
@@ -1005,9 +1111,60 @@ impl Nullamp {
                 (dismiss.into(), positioned.into())
             });
 
-        match (settings_overlay, ctx_overlay) {
-            (Some(s), Some((d, p))) => stack![base, s, d, p].into(),
-            (Some(s), None) => stack![base, s].into(),
+        // Scan modal — same backdrop + panel pattern as settings, mutually exclusive
+        let scan_modal_overlay: Option<Element<'_, Message>> =
+            if self.scan_modal_open && !self.settings_open {
+                let backdrop = iced::widget::mouse_area(
+                    container("")
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(|_theme| container::Style {
+                            background: Some(
+                                iced::Color {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 0.65,
+                                }
+                                .into(),
+                            ),
+                            ..Default::default()
+                        }),
+                )
+                .on_press(Message::CloseScanModal)
+                .on_release(Message::Noop)
+                .on_right_press(Message::Noop)
+                .on_middle_press(Message::Noop)
+                .on_move(|_| Message::Noop);
+
+                let panel = container(views::scan_modal_view(self))
+                    .width(Length::Fixed(480.0))
+                    .style(|_theme| container::Style {
+                        background: Some(theme::BG_SURFACE.into()),
+                        border: iced::Border {
+                            color: theme::BORDER_FRAME,
+                            width: 1.0,
+                            radius: 6.into(),
+                        },
+                        ..Default::default()
+                    });
+
+                let centered = container(panel)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill);
+
+                Some(stack![backdrop, centered].into())
+            } else {
+                None
+            };
+
+        let modal_overlay = settings_overlay.or(scan_modal_overlay);
+
+        match (modal_overlay, ctx_overlay) {
+            (Some(m), Some((d, p))) => stack![base, m, d, p].into(),
+            (Some(m), None) => stack![base, m].into(),
             (None, Some((d, p))) => stack![base, d, p].into(),
             (None, None) => base.into(),
         }

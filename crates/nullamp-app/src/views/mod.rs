@@ -4,6 +4,7 @@ mod equalizer;
 mod library;
 mod player_bar;
 mod queue;
+mod scan_modal;
 mod settings;
 mod status_bar;
 mod voice;
@@ -20,6 +21,7 @@ use iced_fonts::BOOTSTRAP_FONT;
 
 pub use player_bar::player_bar;
 pub use queue::queue_panel;
+pub use scan_modal::scan_modal_view;
 pub use settings::settings_view;
 pub use status_bar::status_bar;
 

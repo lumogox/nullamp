@@ -42,6 +42,7 @@ pub struct ScanProgress {
     pub files_skipped: usize,
     pub files_failed: usize,
     pub files_removed: usize,
+    pub current_file: String,
     pub current_folder: String,
     pub rate: f64,
     pub eta_secs: f64,

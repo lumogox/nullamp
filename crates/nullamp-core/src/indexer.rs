@@ -12,8 +12,34 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 use walkdir::WalkDir;
 
-const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "ogg", "m4a", "wav", "aiff", "wma", "opus", "ape", "wv",
+/// Popular lossless and lossy music formats only.
+/// Excluded: wma (legacy Windows), ape/wv (niche archival) — decoders are
+/// brittle and these extensions are unlikely to appear in personal music libraries.
+const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "ogg", "m4a", "aac", "wav", "aiff", "opus"];
+
+/// Directory names that should never be walked into.
+/// These are system/tool caches and messaging app storage that can contain
+/// audio files (notifications, voice memos) that aren't music.
+const EXCLUDED_DIRS: &[&str] = &[
+    // Rust / JS / Python package caches
+    ".cargo",
+    ".npm",
+    ".pnpm-store",
+    ".yarn",
+    "node_modules",
+    // VCS
+    ".git",
+    // macOS system directories
+    "Caches",
+    "Application Support",
+    "Group Containers", // WhatsApp, iMessage, etc.
+    "Mail",
+    "Messages",
+    // IDE / build artifacts
+    "__MACOSX",
+    "target", // Rust build output
+    ".gradle",
+    ".idea",
 ];
 
 const BATCH_SIZE: usize = 100;
@@ -30,11 +56,25 @@ impl ProgressEmitter for NullEmitter {
     fn emit(&self, _progress: &ScanProgress) {}
 }
 
+/// Returns true if a directory entry should be pruned from the walk.
+/// Only checks directory nodes — files are always passed through here.
+fn is_excluded_dir(entry: &walkdir::DirEntry) -> bool {
+    if !entry.file_type().is_dir() {
+        return false;
+    }
+    entry
+        .file_name()
+        .to_str()
+        .map(|name| EXCLUDED_DIRS.contains(&name))
+        .unwrap_or(false)
+}
+
 /// Discover all supported audio files in a directory tree.
 fn discover_files(root: &Path, cancel: &ScanCancellation) -> Vec<PathBuf> {
     WalkDir::new(root)
         .follow_links(true)
         .into_iter()
+        .filter_entry(|e| !is_excluded_dir(e))
         .filter_map(|entry| {
             if cancel.is_cancelled() {
                 return None;
@@ -134,6 +174,7 @@ pub fn sync_library_parallel(
         files_skipped: 0,
         files_failed: 0,
         files_removed: 0,
+        current_file: String::new(),
         current_folder: music_dir.to_string_lossy().to_string(),
         rate: 0.0,
         eta_secs: 0.0,
@@ -213,13 +254,45 @@ pub fn sync_library_parallel(
         Ok(inserted)
     });
 
-    // Parallel metadata extraction with rayon
+    // Parallel metadata extraction with rayon — emit progress every 25 files
     new_files.par_iter().for_each(|path| {
         if cancel.is_cancelled() {
             return;
         }
         let track = extract_metadata(path);
-        processed.fetch_add(1, Ordering::Relaxed);
+        let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
+
+        if count % 25 == 0 || count == to_process {
+            let elapsed_s = start.elapsed().as_secs_f64();
+            let rate = if elapsed_s > 0.0 {
+                count as f64 / elapsed_s
+            } else {
+                0.0
+            };
+            let remaining = to_process.saturating_sub(count);
+            let eta = if rate > 0.0 {
+                remaining as f64 / rate
+            } else {
+                0.0
+            };
+            emitter.emit(&ScanProgress {
+                phase: "indexing".into(),
+                files_found: total_found,
+                files_processed: count,
+                files_skipped: skipped,
+                files_failed: failed.load(Ordering::Relaxed),
+                files_removed: 0,
+                current_file: path.to_string_lossy().to_string(),
+                current_folder: path
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                rate,
+                eta_secs: eta,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+            });
+        }
+
         if tx.send(track).is_err() {
             failed.fetch_add(1, Ordering::Relaxed);
         }
@@ -242,6 +315,7 @@ pub fn sync_library_parallel(
             files_skipped: skipped,
             files_failed: failed.load(Ordering::Relaxed),
             files_removed: 0,
+            current_file: String::new(),
             current_folder: String::new(),
             rate: 0.0,
             eta_secs: 0.0,
@@ -269,6 +343,7 @@ pub fn sync_library_parallel(
         files_skipped: skipped,
         files_failed: failed.load(Ordering::Relaxed),
         files_removed: 0,
+        current_file: String::new(),
         current_folder: String::new(),
         rate,
         eta_secs: 0.0,
@@ -283,6 +358,7 @@ pub fn sync_library_parallel(
         files_skipped: skipped,
         files_failed: failed.load(Ordering::Relaxed),
         files_removed: 0,
+        current_file: String::new(),
         current_folder: String::new(),
         rate: 0.0,
         eta_secs: 0.0,
@@ -323,6 +399,7 @@ pub fn sync_library_parallel(
         files_skipped: skipped,
         files_failed: failed.load(Ordering::Relaxed),
         files_removed: removed_tracks,
+        current_file: String::new(),
         current_folder: String::new(),
         rate: 0.0,
         eta_secs: 0.0,

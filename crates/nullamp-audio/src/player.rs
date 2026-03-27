@@ -58,10 +58,13 @@ impl AudioPlayer {
             Sink::try_new(&self.stream_handle).map_err(|e| format!("Sink creation failed: {e}"))?;
         self.sink.set_volume(self.volume);
 
-        // Open file and decode
+        // Open file and decode — wrap in catch_unwind because some rodio/symphonia
+        // decoder paths call unreachable!() on malformed files instead of returning Err.
         let file =
             File::open(path).map_err(|e| format!("Failed to open {}: {e}", path.display()))?;
-        let source = Decoder::new(BufReader::new(file))
+        let buf = BufReader::new(file);
+        let source = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Decoder::new(buf)))
+            .map_err(|_| format!("Decoder panicked on: {}", path.display()))?
             .map_err(|e| format!("Failed to decode {}: {e}", path.display()))?;
 
         // Wrap with EQ processing and append to sink
