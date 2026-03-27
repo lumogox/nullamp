@@ -1,0 +1,23 @@
+# Nullamp build scripts (use: cargo script <name>, or npm run <name>)
+
+[scripts]
+
+[scripts.dev]
+command = "cargo run -p nullamp-app"
+description = "Run in development mode"
+
+[scripts.build]
+command = "cargo build -p nullamp-app --release"
+description = "Build release binary"
+
+[scripts.test]
+command = "cargo test --workspace"
+description = "Run all tests"
+
+[scripts.check]
+command = "cargo clippy --workspace -- -D warnings"
+description = "Lint with clippy"
+
+[scripts.clean]
+command = "cargo clean"
+description = "Remove build artifacts"
