@@ -19,7 +19,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Read version from Cargo.toml
         id: version
@@ -57,7 +57,7 @@ jobs:
             asset: nullamp-linux-x64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
